@@ -6,16 +6,21 @@
 
 
 # import python packages
+import Extract_Scaleheights
 import sys
 import os
 import copy
 import numpy as np
-import scipy.interpolate as spirp
+import scipy.interpolate as interpolate
 import scipy.ndimage as ndimage
 import scipy.stats as stats
 from optparse import OptionParser
 from astropy.io import fits
 from astropy.wcs import WCS
+from dataclasses import dataclass, field
+from omegaconf import MISSING, OmegaConf
+from typing import List, Optional
+
 import warnings
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -27,39 +32,51 @@ with warnings.catch_warnings():
     import matplotlib.axes as maxes
 
 # Then let's add our main directory
-sys.path.insert(1, '../')
-import common_functions as cf
+import pk_common_functions.functions as cf
+import psutil
 
+
+# A dataclass object for Omega Conf to use for input
+@dataclass
+class defaults:
+    configuration_file: Optional[str] = None
+    ncpu: int = len(psutil.Process().cpu_affinity())
+    cube_name: Optional[str] = None #'Define the cube to be analysed.'
+    deffile: Optional[str] = None # Input Tirific Def File
+    weighted_r: str = 'r_map.fits' #Name of the output CSDD cube
+    rotated_cube: str = 'CSDD_Rotated_Cube.fits' #'Name of the output rotated cube
+    plot_name: str = f'scale_height_plot.png' #  'Name of the output scaleheight plot in FWHM
+    distance: float = 1. #Distance to the galaxy
+    print_examples: bool = False
+
+class InputError(Exception):
+    pass
 
 # This program makes CSDD maps as described in Olling 1995
-
 def createCSDDmaps(deffile_name = 'Input.def', cube_name = 'Default_Cube.fits', weighted_map_name= 'R_Mapping.fits'):
-
     #Constants that are used in the code
     H_0 = 70. #km/s/Mpc #Hubble constant
-
+    #The variables we need from the tirific model
     variables_we_need = ['RADI','INCL','INCL_2','PA','PA_2','VROT','VROT_2','SBR','SBR_2','NDISKS','SDIS','SDIS_2','VSYS','XPOS','YPOS']
-    #First we the tirific PARAMETERS
+    #And we extract them
     profiles =  cf.load_tirific(deffile_name,Variables = variables_we_need)
-
     #Make sure that everything is filles also for single disks
-    if float(profiles[variables_we_need.index('NDISKS')][0]) == 1:
-        profiles[variables_we_need.index('INCL_2')] = profiles[variables_we_need.index('INCL')]
-        profiles[variables_we_need.index('PA_2')] = profiles[variables_we_need.index('PA')]
-        profiles[variables_we_need.index('VROT_2')] = profiles[variables_we_need.index('VROT')]
-        profiles[variables_we_need.index('SBR_2')] = profiles[variables_we_need.index('SBR')]
-        profiles[variables_we_need.index('SDIS_2')] = profiles[variables_we_need.index('SDIS')]
+    variables = ['INCL','PA','VROT','SBR','SDIS']
 
+    if float(profiles[variables_we_need.index('NDISKS')][0]) == 1:
+        for var in variables:
+            profiles[variables_we_need.index(f'{var}_2')] = profiles[variables_we_need.index(var)]
     #Create symmetric functions
-    incl_r = spirp.interp1d(profiles[variables_we_need.index('RADI')],\
+
+    incl_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
             [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('INCL')],profiles[variables_we_need.index('INCL_2')])])
-    pa_r = spirp.interp1d(profiles[variables_we_need.index('RADI')],\
+    pa_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
             [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('PA')],profiles[variables_we_need.index('PA_2')])])
-    vrot_r = spirp.interp1d(profiles[variables_we_need.index('RADI')],\
+    vrot_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
             [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('VROT')],profiles[variables_we_need.index('VROT_2')])])
-    sbr_r = spirp.interp1d(profiles[variables_we_need.index('RADI')],\
+    sbr_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
             [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('SBR')],profiles[variables_we_need.index('SBR_2')])])
-    sdis_r = spirp.interp1d(profiles[variables_we_need.index('RADI')],\
+    sdis_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
             [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('SDIS')],profiles[variables_we_need.index('SDIS_2')])])
 
     #open our dumb cube as a template
@@ -280,21 +297,69 @@ def measure_FWHM(cube_name = 'Input_Cube.fits', center = [0,0,0] ,\
 
     return np.array(found_values,dtype=float)
 
+def setup_input_parameters(argv):
+
+    if '-v' in argv or '--version' in argv:
+        print(f"This is version {Extract_Scaleheights.__version__} of the program.")
+        sys.exit()
+
+    if '-h' in argv or '--help' in argv:
+        print('''
+Use Extract_Scaleheights in this way:
+Create_CSDD configuration_file=inputfile.yml   where inputfile is a yaml config file with the desired input settings.
+Create_CSDD -h print this message
+Create_CSDD print_examples=True prints a yaml file (defaults.yml) with the default setting in the current working directory.
+in this file values designated ??? indicated values without defaults.
+
+All config parameters can be set directly from the command line by setting the correct parameters, e.g:
+Create_CSDD cube_name=cube.fits distance=8.9
+''')
+        sys.exit()
+
+    cfg = OmegaConf.structured(defaults)
+    inputconf = OmegaConf.from_cli(argv)
+    cfg_input = OmegaConf.merge(cfg,inputconf)
+        # read command line arguments anything list input should be set in '' e.g. pyROTMOD 'rotmass.MD=[1.4,True,True]'
+
+    if cfg_input.print_examples:
+        with open('default.yml','w') as default_write:
+            default_write.write(OmegaConf.to_yaml(cfg))
+        sys.exit()
+
+    if cfg_input.configuration_file:
+        succes = False
+        while not succes:
+            try:
+                yaml_config = OmegaConf.load(cfg_input.configuration_file)
+        #merge yml file with defaults
+                cfg = OmegaConf.merge(cfg,yaml_config)
+                succes = True
+            except FileNotFoundError:
+                raise InputError(f'We could not find the file {cfg_input.configuration_file}')
+
+    input_parameters = OmegaConf.merge(cfg,inputconf)
+
+    if input_parameters.cube_name == None:
+        raise InputError(f'There is no default for the cube_name.')
+    if input_parameters.deffile == None:
+        raise InputError(f'There is no default for the TiRiFiC file.')
+    return input_parameters
+
+setup_input_parameters.__doc__ =f'''
+This function sets up the input parameters object through Omega Conf
+'''
+
+
 def main(argv):
-    #Then check the input options
-    parser  = OptionParser()
-    parser.add_option('-c','--cube', action ="store" ,dest = "cube", default = '', help = 'Define the cube to be analysed.',metavar='CUBE')
-    parser.add_option('-f','--deffile', action ="store" ,dest = "deffile", default = '', help = 'Input def file',metavar = 'DEFFILE')
-    parser.add_option('-r','--weighted_r', action ="store" ,dest = "weighted_r", default='r_map.fits', help = 'Name of the output CSDD cube',metavar='OUT_MAP')
-    parser.add_option('-t','--rotated_cube', action ="store" ,dest = "rot_cube_name", default='', help = 'Name of the output rotated cube',metavar='ROT_CUBE')
-    parser.add_option('-p','--plot_name', action ="store" ,dest = "final_plot", default='Z0.png', help = 'Name of the output sclaeheight plot in FWHM',metavar='PLOT')
-    parser.add_option('-d','--distance', action ="store" ,dest = "distance", default=-1, help = 'Distance to the galaxy',metavar='DISTANCE')
+    input_parameters = setup_input_parameters(argv)
 
-    input_parameters,args = parser.parse_args()
-
+    print(input_parameters)
+    sys.exit()
 
     #First we create our weighted R_map for the mapping purposes
-    r_max = createCSDDmaps(deffile_name = input_parameters.deffile, cube_name = input_parameters.cube, weighted_map_name= input_parameters.weighted_r)
+    r_max = createCSDDmaps(deffile_name = input_parameters.deffile, \
+        cube_name = input_parameters.cube_name, \
+        weighted_map_name= input_parameters.weighted_r)
     # Then we need some info about the galaxy to not over do the fitting
     variables_we_need = ['INCL','INCL_2','PA','PA_2','VROT','VROT_2','RMS','BMAJ','BMIN','VSYS','XPOS','YPOS','Z0','RADI']
     #First we the tirific PARAMETERS
@@ -304,10 +369,13 @@ def main(argv):
                 *np.sin(np.radians(np.max([profiles[variables_we_need.index('INCL')],profiles[variables_we_need.index('INCL_2')]])))
     vel_range = 1.1*vel_in_cube
     beam =  [profiles[variables_we_need.index('BMAJ')][0],profiles[variables_we_need.index('BMIN')][0]]
-    vals = measure_FWHM(cube_name = input_parameters.cube, beam= beam, center =\
-                                [profiles[variables_we_need.index('XPOS')][0],profiles[variables_we_need.index('YPOS')][0],profiles[variables_we_need.index('VSYS')][0]]\
-                             ,r_max = r_max,pa =pa ,map_name = input_parameters.weighted_r, vel_range = vel_range ,noise= profiles[variables_we_need.index('RMS')][0]\
-                             ,rot_cube_name = input_parameters.rot_cube_name)
+    vals = measure_FWHM(cube_name = input_parameters.cube_name, beam= beam, \
+        center = [profiles[variables_we_need.index('XPOS')][0],\
+        profiles[variables_we_need.index('YPOS')][0],\
+        profiles[variables_we_need.index('VSYS')][0]],r_max = r_max,pa =pa ,\
+        map_name = input_parameters.weighted_r, vel_range = vel_range ,\
+        noise= profiles[variables_we_need.index('RMS')][0]\
+        ,rot_cube_name = input_parameters.rotated_cube)
 
     if float(input_parameters.distance) != -1:
         tmp1 = cf.convertskyangle(vals[:,0],distance=float(input_parameters.distance))
