@@ -52,45 +52,16 @@ class defaults:
 class InputError(Exception):
     pass
 
-# This program makes CSDD maps as described in Olling 1995
-def createCSDDmaps(deffile_name = 'Input.def', cube_name = 'Default_Cube.fits', weighted_map_name= 'R_Mapping.fits'):
-    #Constants that are used in the code
-    H_0 = 70. #km/s/Mpc #Hubble constant
-    #The variables we need from the tirific model
-    variables_we_need = ['RADI','INCL','INCL_2','PA','PA_2','VROT','VROT_2','SBR','SBR_2','NDISKS','SDIS','SDIS_2','VSYS','XPOS','YPOS']
-    #And we extract them
-    profiles =  cf.load_tirific(deffile_name,Variables = variables_we_need)
-    #Make sure that everything is filles also for single disks
-    variables = ['INCL','PA','VROT','SBR','SDIS']
-
-    if float(profiles[variables_we_need.index('NDISKS')][0]) == 1:
-        for var in variables:
-            profiles[variables_we_need.index(f'{var}_2')] = profiles[variables_we_need.index(var)]
-    #Create symmetric functions
-
-    incl_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
-            [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('INCL')],profiles[variables_we_need.index('INCL_2')])])
-    pa_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
-            [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('PA')],profiles[variables_we_need.index('PA_2')])])
-    vrot_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
-            [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('VROT')],profiles[variables_we_need.index('VROT_2')])])
-    sbr_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
-            [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('SBR')],profiles[variables_we_need.index('SBR_2')])])
-    sdis_r = interpolate.interp1d(profiles[variables_we_need.index('RADI')],\
-            [np.mean([x,y]) for x,y in zip(profiles[variables_we_need.index('SDIS')],profiles[variables_we_need.index('SDIS_2')])])
-
-    #open our dumb cube as a template
+def setup_header(cube_name):
+#open our  cube as a template
     hdr = fits.getheader(cube_name)
     if hdr['CDELT3'] < 100.:
         hdr['CDELT3'] = hdr['CDELT3']*1000.
         hdr['CRVAL3'] = hdr['CRVAL3']*1000.
         hdr['CUNIT3'] = 'M/S'
-
     hdr = cf.reduce_header_axes(hdr)
-
     # make an empty fake cube centered on the galaxy
     out_header = copy.deepcopy(hdr)
-
     out_header['CRVAL1'] = 0.
     out_header['CRPIX1'] = 1
     out_header['CTYPE1'] = 'Offset'
@@ -103,66 +74,126 @@ def createCSDDmaps(deffile_name = 'Input.def', cube_name = 'Default_Cube.fits', 
     out_header['CUNIT2'] = 'arcsec'
     out_header['CRVAL3'] = 0.
     out_header['CRPIX3'] = 1
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        csdd_wcs = WCS(out_header)
-    #make an empty cube
-    csdd = np.zeros([out_header['NAXIS3'],out_header['NAXIS2'],out_header['NAXIS1']])
-    #fill it
-    beam_in_pixels = [hdr['BMAJ']*3600./out_header['CDELT1'],hdr['BMIN']*3600./out_header['CDELT1']]
+    return out_header
+setup_header.__doc__ = '''
+Setup the header to use for the CSDD cube
+'''
 
-    x_proj = out_header['CRVAL1'] + (np.arange(out_header['NAXIS1'])+1 \
-          - out_header['CRPIX1']) * out_header['CDELT1']
-    y_proj = out_header['CRVAL2'] + (np.arange(out_header['NAXIS2'])+1 \
-          - out_header['CRPIX2']) * out_header['CDELT2']
-    zaxis = out_header['CRVAL3'] + (np.arange(out_header['NAXIS3'])+1 \
-          - out_header['CRPIX3']) * out_header['CDELT3']
-    x_map = np.resize(x_proj, [out_header['NAXIS2'],out_header['NAXIS1']])
-    x_cube = np.resize(x_map, [out_header['NAXIS3'],out_header['NAXIS2'],out_header['NAXIS1']])
+def create_rmap(hdr,radi):
+    x_proj = hdr['CRVAL1'] + (np.arange(hdr['NAXIS1'])+1 \
+          - hdr['CRPIX1']) * hdr['CDELT1']
+    y_proj = hdr['CRVAL2'] + (np.arange(hdr['NAXIS2'])+1 \
+          - hdr['CRPIX2']) * hdr['CDELT2']
+    x_map = np.resize(x_proj, [hdr['NAXIS2'], hdr['NAXIS1']])
+    x_cube = np.resize(x_map, [hdr['NAXIS3'], hdr['NAXIS2'], hdr['NAXIS1']])
 
-    y_map = np.transpose(np.resize(y_proj, [out_header['NAXIS2'],out_header['NAXIS1']]))
-    y_cube = np.resize(y_map, [out_header['NAXIS3'],out_header['NAXIS2'],out_header['NAXIS1']])
+    y_map = np.transpose(np.resize(y_proj, [hdr['NAXIS2'], hdr['NAXIS1']]))
+    y_cube = np.resize(y_map, [hdr['NAXIS3'], hdr['NAXIS2'], hdr['NAXIS1']])
 
     r_map = np.sqrt(x_cube**2+y_cube**2)
-    r_max = np.nanmax(profiles[variables_we_need.index('RADI')])
+    r_max = np.nanmax(radi)
     r_map[r_map > r_max] = 0.
-    #float('NaN')
+    return r_map,r_max,x_cube,y_cube
 
-    vel_cube=np.transpose(np.resize(zaxis,[out_header['NAXIS1'],out_header['NAXIS2'],len(zaxis)]),(2,1,0))/1000.
+# This program makes CSDD maps as described in Olling 1995
+def createCSDDmaps(deffile_name = 'Input.def', cube_name = 'Default_Cube.fits', weighted_map_name= 'R_Mapping.fits'):
+    #Constants that are used in the code
+    H_0 = 70. #km/s/Mpc #Hubble constant
+    #The variables we need from the tirific model
+    variables_we_need = ['RADI','INCL','INCL_2','PA','PA_2','VROT','VROT_2',\
+        'SBR','SBR_2','NDISKS','SDIS','SDIS_2','VSYS','XPOS','YPOS']
+    #And we extract them
+    profiles =  cf.load_tirific(deffile_name,Variables = variables_we_need,\
+        dict=True,array=True)
+    #Make sure that everything is filles also for single disks
+    variables = ['INCL','PA','VROT','SBR','SDIS']
+    #Create symmetric functions
+    symmetric = {}
+    for var in variables:
+        if float(profiles['NDISKS'][0]) == 1:
+            symmetric[var] = profiles[var]
+        else:
+            symmetric[var]= interpolate.interp1d(profiles['RADI'],\
+                [np.mean([x,y]) for x,y in zip(profiles[var],\
+                profiles[f'{var}_2'])])
+
+    csdd_hdr = setup_header(cube_name)
+    #Create rmap
+    r_map,r_max,x_cube,y_cube = create_rmap(csdd_hdr,profiles['RADI'])
+
+    # Set up a WCS
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        Vp = vrot_r(r_map)*np.sin(np.radians(incl_r(r_map)))*np.cos(np.arctan(y_cube/x_cube))
+        csdd_wcs = WCS(csdd_hdr)
+    #make an empty cube
+    csdd = np.zeros([csdd_hdr['NAXIS3'],csdd_hdr['NAXIS2'],csdd_hdr['NAXIS1']])
 
-    csdd = sbr_r(r_map)*np.exp(-0.5*((vel_cube-Vp)/sdis_r(r_map))**2)
+    zaxis = csdd_hdr['CRVAL3'] + (np.arange(csdd_hdr['NAXIS3'])+1 \
+          - csdd_hdr['CRPIX3']) * csdd_hdr['CDELT3']
+
+    vel_cube=np.transpose(np.resize(zaxis,[csdd_hdr['NAXIS1'],csdd_hdr['NAXIS2'],\
+        len(zaxis)]),(2,1,0))/1000.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        Vp = symmetric['VROT'](r_map)*np.sin(np.radians(symmetric['INCL'](r_map)))\
+            *np.cos(np.arctan(y_cube/x_cube))
+
+    csdd = symmetric['SBR'](r_map)*np.exp(-0.5*((vel_cube-Vp)/symmetric['SDIS'](r_map))**2)
     csdd[~np.isfinite(csdd)] = 0.
+
+    beam_in_pixels = [csdd_hdr['BMAJ']*3600./csdd_hdr['CDELT1'],\
+        csdd_hdr['BMIN']*3600./csdd_hdr['CDELT1']]
+
     csdd= ndimage.gaussian_filter(csdd,sigma= [0,beam_in_pixels[1],beam_in_pixels[0]],order=0.)
     noise = 1e-5
+    fits.writeto('Test_R_Cube.fits',r_map, csdd_hdr,overwrite = True)
+    fits.writeto('CSDD_Cube.fits',csdd, csdd_hdr,overwrite = True)
 
     csdd[ csdd < noise] = float('NaN')
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        mean_weight_r = np.nansum(r_map[4:,:,:]*csdd[4:,:,:], axis=1)/ np.nansum(csdd[4:,:,:], axis=1)
+        mean_weight_r = np.nansum(r_map[:,:,:]*csdd[:,:,:], axis=1)/\
+            np.nansum(csdd[:,:,:], axis=1)
+
+    for i in range(len(mean_weight_r[0,:])):
+        if np.isnan(mean_weight_r[0,i]) or (mean_weight_r[0,i] == 0.):
+            last_value= i-1
+            break
+    for i in range(len(mean_weight_r[:,0])):
+        if np.isnan(mean_weight_r[i,last_value]) or \
+            (mean_weight_r[i,last_value] == 0.):
+            cut = i
+            break
+    mean_weight_r = mean_weight_r[cut:,:]
+
+
+            #break
+
+
+
     ax = ['CDELT','CTYPE','CUNIT','CRPIX','CRVAL']
     for par in ax:
         try:
-            out_header[f'{par}2'] = out_header[f'{par}3']
-            out_header.remove(f'{par}3')
+            csdd_hdr[f'{par}2'] = csdd_hdr[f'{par}3']
+            csdd_hdr.remove(f'{par}3')
         except KeyError:
             pass
-    out_header['CRPIX2'] = out_header['CRPIX2']-4
-    out_header['CDELT1'] = 1.
-    out_header['CUNIT1'] = 'pixels'
-    out_header['CUNIT2'] = 'channels'
-    out_header['CTYPE2'] = 'channel offset'
-    out_header['CDELT2'] = 1.
-    out_header['CRVAL2'] = 0.
-    fits.writeto(weighted_map_name, mean_weight_r, out_header,overwrite = True)
+    csdd_hdr['CRPIX2'] = csdd_hdr['CRPIX2']-cut
+    csdd_hdr['CDELT1'] = 1.
+    csdd_hdr['CUNIT1'] = 'pixels'
+    csdd_hdr['CUNIT2'] = 'channels'
+    csdd_hdr['CTYPE2'] = 'channel offset'
+    csdd_hdr['CDELT2'] = 1.
+    csdd_hdr['CRVAL2'] = 0.
+    csdd_hdr['BUNIT'] = 'Radius'
+    fits.writeto(weighted_map_name, mean_weight_r, csdd_hdr,overwrite = True)
+
     return r_max
 
 
 def measure_FWHM(cube_name = 'Input_Cube.fits', center = [0,0,0] ,\
                 r_max = 100.,pa =90. ,map_name = 'r_map.fits', beam = [1.,1.],
-                vel_range = [0.,0.] , noise= 0.,rot_cube_name = ''):
+                vel_range = [0.,0.] , noise= 0.,rotated_cube_name = ''):
     cube = fits.open(cube_name)
     hdr = cf.reduce_header_axes(cube[0].header)
     data = cf.reduce_data_axes(cube[0].data)
@@ -175,23 +206,21 @@ def measure_FWHM(cube_name = 'Input_Cube.fits', center = [0,0,0] ,\
         warnings.simplefilter("ignore")
         cube_wcs = WCS(hdr)
     # get the central pixels
-    x_center,y_center,z_center = cube_wcs.wcs_world2pix(center[0],center[1],(center[2])*1000.,0.)
+    x_center,y_center,z_center = cube_wcs.wcs_world2pix(center[0],center[1],\
+        (center[2])*1000.,0.)
+    print(f'This is the central channel {z_center}')
     # PA is the angle to the receding sid from north, we always want the receding side to be negative offsets
     # Pa runs counter clockwise but we are rotating clockwise so pa-90
-    rot_data = cf.rotateCube(data, pa-90, [x_center,y_center])
+    rotated_cube = cf.rotateCube(data, pa-90, [x_center,y_center])
     # We blank everything in the cube that is less than 3 * the noise value
-
-    #exit()
-    rot_data[rot_data < 3.*noise] = float('NaN')
-    if rot_cube_name != '':
-        fits.writeto(rot_cube_name, rot_data, hdr,overwrite = True)
-
-
+    rotated_cube[rotated_cube < 3.*noise] = float('NaN')
+    if rotated_cube_name != '':
+        fits.writeto(rotated_cube_name, rotated_cube, hdr,overwrite = True)
     z_pix= int(z_center)
     # our maximum r in pixels =
     pix_size = np.mean([abs(hdr['CDELT1']),abs(hdr['CDELT2'])])*3600.
     r_max_pix = r_max/pix_size
-
+    #
     weight_map = fits.open(map_name)
     weight_xaxis = weight_map[0].header['CRVAL1'] + (np.arange(weight_map[0].header['NAXIS1'])+1 \
               - weight_map[0].header['CRPIX1']) * weight_map[0].header['CDELT1']
@@ -200,17 +229,26 @@ def measure_FWHM(cube_name = 'Input_Cube.fits', center = [0,0,0] ,\
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r_min_pix = np.nanmin(weight_map[0].data[weight_map[0].data > 0.])/pix_size
-
+        if r_min_pix < 2:
+            r_min_pix=2
+        print(r_min_pix,np.nanmin(weight_map[0].data[weight_map[0].data > 0.]) )
     # Get the minimum and maximum velocity channel to analyse
     # get the central pixels
-    x_tmp,y_tmp,z_range = cube_wcs.wcs_world2pix(center[0],center[1],(center[2]+vel_range)*1000.,0.)
-    xaxis = np.arange(hdr['NAXIS2'])
+    x_tmp,y_tmp,z_range = cube_wcs.wcs_world2pix(center[0],center[1],\
+        (center[2]+vel_range)*1000.,0.)
+    x_tmp,y_tmp,z_start = cube_wcs.wcs_world2pix(center[0],center[1],\
+        (center[2]-vel_range)*1000.,0.)
+
+
+    yaxis = np.arange(hdr['NAXIS2'])
     # run through the relevant channels
     found_values = []
-    for i in range(int(z_range)+1):
+    succes_fit=0
+    failed_fit=0
+    no_fit= 0
+    for i in range(int(z_start)-2,int(z_range)+2):
+        print(f'Processing Channel {i}')
         if int(z_center+i) < hdr['NAXIS3'] and int(z_center-i) >= 0:
-
-
             #run trhough the relevant x_range ranges
             for x in range(int(r_min_pix)-2,int(r_max_pix)+2):
                 #x is the same in the map as in offset no need to map it
@@ -223,15 +261,18 @@ def measure_FWHM(cube_name = 'Input_Cube.fits', center = [0,0,0] ,\
                 # is our mapping correct?
                 #print(f'The input is {i} {x}')
                 #print(f'Ourmapping is {map_z} {x}')
-                if 0 < x < weight_map[0].header['NAXIS1'] and  0 < map_z < weight_map[0].header['NAXIS2']:
+                if 0 < x < weight_map[0].header['NAXIS1'] and \
+                    0 < map_z < weight_map[0].header['NAXIS2']:
                     R = weight_map[0].data[map_z,x]
                     #print(f'And then R is {R}')
                     #extract the profile and fit
                     if np.isfinite(R):
-                        channels = np.array([rot_data[int(z_center-i),:,:],rot_data[int(z_center+i),:,:]])
+                        channels = np.array([rotated_cube[int(z_center-i),:,:],\
+                            rotated_cube[int(z_center+i),:,:]])
                         #print(channels.shape)
-                        #print(f'extracting channels ast {z_pix-i} and {z_pix+i} with i= {i} and center {z_center}')
+                        #print(f'extracting channels at {z_pix-i} and {z_pix+i} with i= {i} and center {z_center}')
                         for j in [0,1]:
+                            no_fit += 1
                             #receding side is negative offsets so higher channel are at min x
                             if j == 0:
                                 offset= 1
@@ -242,59 +283,69 @@ def measure_FWHM(cube_name = 'Input_Cube.fits', center = [0,0,0] ,\
                             #print(profile)
                             #if i >11:
                             #    exit()
-                            if np.nansum(profile) > 0. and np.nanmax(profile) > 5.*noise:
+                            if np.nansum(profile) > 0. and np.nanmax(profile) \
+                                > 5.*noise:
                                     #fit a gausssin
-                                    fit_axis = xaxis[np.isfinite(profile)]
-                                    diff = np.array([float(x-y) for x,y in zip(fit_axis[1:],fit_axis)],dtype=float)
-                                    trig=False
-                                    while not all([f == 1 for f in diff]):
-                                        jump_location = np.where(diff > 1.)[0]
-                                        if len(jump_location) > 1:
-                                            cont_size = np.array([float(x-y) for x,y in zip(jump_location[1:],jump_location)],dtype=float)
-                                            cont_size = np.hstack((jump_location[0]+1,cont_size,len(fit_axis)-jump_location[-1]-1))
-                                            big = np.where(cont_size == np.nanmax(cont_size))[0]
+                                fit_axis = yaxis[np.isfinite(profile)]
+                                diff = np.array([float(x-y) for x,y \
+                                    in zip(fit_axis[1:],fit_axis)],dtype=float)
+                                trig=False
+                                while not all([f == 1 for f in diff]):
+                                    jump_location = np.where(diff > 1.)[0]
+                                    if len(jump_location) > 1:
+                                        cont_size = np.array([float(x-y) for\
+                                            x,y in zip(jump_location[1:],\
+                                            jump_location)],dtype=float)
+                                        cont_size = np.hstack((jump_location[0]+1\
+                                            ,cont_size,len(fit_axis)-jump_location[-1]-1))
+                                        big = np.where(cont_size == \
+                                            np.nanmax(cont_size))[0]
                                             #print(big)
-                                            if big[0] == 0:
-                                                fit_axis =fit_axis[:int(jump_location[big[0]])+1]
-                                            else:
-                                                fit_axis =fit_axis[jump_location[big[0]-1]+1:int(jump_location[big[0]-1]+np.nanmax(cont_size)+1)]
+                                        if big[0] == 0:
+                                            fit_axis =fit_axis[:int(jump_location[big[0]])+1]
                                         else:
-                                            if len(diff)-jump_location[0] > jump_location[0]:
-                                                fit_axis = fit_axis[jump_location[0]+1:]
-                                            else:
-                                                fit_axis = fit_axis[:jump_location[0]+1]
-                                        diff = np.array([float(x-y) for x,y in zip(fit_axis[1:],fit_axis)],dtype=float)
+                                            fit_axis =fit_axis[jump_location[big[0]-1]\
+                                                +1:int(jump_location[big[0]-1]+\
+                                                np.nanmax(cont_size)+1)]
+                                    else:
+                                        if len(diff)-jump_location[0] > jump_location[0]:
+                                            fit_axis = fit_axis[jump_location[0]+1:]
+                                        else:
+                                            fit_axis = fit_axis[:jump_location[0]+1]
+                                    diff = np.array([float(x-y) for x,y in \
+                                        zip(fit_axis[1:],fit_axis)],dtype=float)
 
-                                    fit_profile = profile[fit_axis]
-                                    if trig:
-                                        print(fit_profile)
-                                        print(profile[np.isfinite(profile)])
-                                        exit()
-                                        #if not continuous we need to eak out the peak
+                                fit_profile = profile[fit_axis]
 
-                                    if len(fit_axis) > 3.:
-                                        parms = cf.fit_gaussian(fit_axis,fit_profile)
-                                        if np.sqrt((parms[2]*(2.0*np.sqrt(2.0*np.log(2.0)))*pix_size)**2-beam[0]**2) > 1000.:
-                                            print(R*offset,np.sqrt((parms[2]*(2.0*np.sqrt(2.0*np.log(2.0)))*pix_size)**2-beam[0]**2))
-                                            print(diff,fit_axis)
-                                            plt.plot(xaxis[np.isfinite(profile)], profile[np.isfinite(profile)])
-                                            plt.plot(fit_axis, fit_profile,'-r')
-                                            plt.plot(xaxis,cf.gaussian_function(xaxis, *parms))
-                                            plt.plot([y_center-parms[2]*(np.sqrt(2.0*np.log(2.0))),y_center+parms[2]*(np.sqrt(2.0*np.log(2.0)))],\
-                                                        [np.max(profile[np.isfinite(profile)])/2.,np.max(profile[np.isfinite(profile)])/2.])
-                                            plt.show()
+                                #if not continuous we need to eak out the peak
 
-                                        if np.isfinite(parms[0]) and parms[0] > 5.*noise and (parms[2]*(2.0*np.sqrt(2.0*np.log(2.0)))*pix_size)**2-beam[0]**2 > 0.:
-                                            found_values.append([R*offset,np.sqrt((parms[2]*(2.0*np.sqrt(2.0*np.log(2.0)))*pix_size)**2-beam[0]**2)])
+                                if len(fit_axis) > 3.:
+                                    parms = cf.fit_gaussian(fit_axis,fit_profile)
 
+                                    if np.sqrt((parms[2]*(2.0*np.sqrt(2.0*\
+                                        np.log(2.0)))*pix_size)**2-beam[0]**2) \
+                                            > 1000.:
+                                        plt.plot(xaxis[np.isfinite(profile)], profile[np.isfinite(profile)])
+                                        plt.plot(fit_axis, fit_profile,'-r')
+                                        plt.plot(xaxis,cf.gaussian_function(xaxis, *parms))
+                                        plt.plot([y_center-parms[2]*(np.sqrt(2.0*np.log(2.0))),y_center+parms[2]*(np.sqrt(2.0*np.log(2.0)))],\
+                                            [np.max(profile[np.isfinite(profile)])/2.,np.max(profile[np.isfinite(profile)])/2.])
+                                        plt.show()
 
-                        #fit a Gaussian to the profil
-
+                                    if np.isfinite(parms[0]) and parms[0] > \
+                                        5.*noise and (parms[2]*\
+                                        (2.0*np.sqrt(2.0*np.log(2.0)))*pix_size)**2\
+                                        -beam[0]**2 > 0.:
+                                        found_values.append([R*offset,\
+                                            np.sqrt((parms[2]*(2.0*np.sqrt(2.0*\
+                                            np.log(2.0)))*pix_size)**2-beam[0]**2)])
+                                        succes_fit += 1
+                                    else:
+                                        failed_fit += 1
+                                        print(f'The fit for {R*offset} failed')
                 else:
                     pass
-                    #print(f'{map_x} {map_z} This value is not in the mapped range')
-
-
+    print(f'Out of {no_fit} fit {succes_fit} were succesful and {failed_fit} failed.')
     return np.array(found_values,dtype=float)
 
 def setup_input_parameters(argv):
