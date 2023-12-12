@@ -4,7 +4,7 @@
 
 # This program makes CSDD maps as described in Olling 1995
 
-import common_functions as cf
+import pk_common_functions.functions as cf
 import support_functions as sf
 import sys
 import os

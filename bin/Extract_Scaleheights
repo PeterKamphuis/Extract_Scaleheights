@@ -1,0 +1,10 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import Extract_Scaleheights.main as main
+import sys
+#from viztracer import VizTracer
+
+if __name__ == '__main__':
+    #with VizTracer(output_file="FAT_Run_Viztracer.json",min_duration=1000) as tracer:
+    main.main(sys.argv[1:])
